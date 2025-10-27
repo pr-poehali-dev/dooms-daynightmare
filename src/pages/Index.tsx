@@ -2,6 +2,8 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import { Slider } from '@/components/ui/slider';
+import { Switch } from '@/components/ui/switch';
+import { Label } from '@/components/ui/label';
 import Icon from '@/components/ui/icon';
 import { useToast } from '@/hooks/use-toast';
 
@@ -51,6 +53,14 @@ interface Weapon {
   owned: boolean;
 }
 
+interface Settings {
+  volume: number;
+  graphics: number;
+  sensitivity: number;
+  showHints: boolean;
+  forceMobile: boolean;
+}
+
 const WEAPONS: Weapon[] = [
   { name: 'Пистолет', damage: 10, fireRate: 500, ammoPerShot: 1, price: 0, owned: true },
   { name: 'Дробовик', damage: 30, fireRate: 800, ammoPerShot: 2, price: 50, owned: false },
@@ -58,14 +68,91 @@ const WEAPONS: Weapon[] = [
 ];
 
 const MAP_SIZE = 50;
-const TILE_SIZE = 64;
 const WALL_HEIGHT = 64;
+
+const generateMap = (): number[][] => {
+  const map = Array(MAP_SIZE).fill(0).map(() => Array(MAP_SIZE).fill(1));
+  
+  const rooms: Array<{x: number, y: number, w: number, h: number}> = [];
+  const numRooms = 8;
+  
+  for (let i = 0; i < numRooms; i++) {
+    const w = 5 + Math.floor(Math.random() * 6);
+    const h = 5 + Math.floor(Math.random() * 6);
+    const x = 2 + Math.floor(Math.random() * (MAP_SIZE - w - 4));
+    const y = 2 + Math.floor(Math.random() * (MAP_SIZE - h - 4));
+    
+    let overlaps = false;
+    for (const room of rooms) {
+      if (!(x + w < room.x || x > room.x + room.w || y + h < room.y || y > room.y + room.h)) {
+        overlaps = true;
+        break;
+      }
+    }
+    
+    if (!overlaps) {
+      for (let ry = y; ry < y + h; ry++) {
+        for (let rx = x; rx < x + w; rx++) {
+          map[ry][rx] = 0;
+        }
+      }
+      rooms.push({ x, y, w, h });
+    }
+  }
+  
+  for (let i = 0; i < rooms.length - 1; i++) {
+    const room1 = rooms[i];
+    const room2 = rooms[i + 1];
+    
+    const cx1 = Math.floor(room1.x + room1.w / 2);
+    const cy1 = Math.floor(room1.y + room1.h / 2);
+    const cx2 = Math.floor(room2.x + room2.w / 2);
+    const cy2 = Math.floor(room2.y + room2.h / 2);
+    
+    let x = cx1;
+    while (x !== cx2) {
+      map[cy1][x] = 0;
+      x += x < cx2 ? 1 : -1;
+    }
+    
+    let y = cy1;
+    while (y !== cy2) {
+      map[y][cx2] = 0;
+      y += y < cy2 ? 1 : -1;
+    }
+  }
+  
+  if (rooms.length > 0) {
+    const startRoom = rooms[0];
+    for (let ry = startRoom.y; ry < startRoom.y + startRoom.h; ry++) {
+      for (let rx = startRoom.x; rx < startRoom.x + startRoom.w; rx++) {
+        map[ry][rx] = 0;
+      }
+    }
+  }
+  
+  return map;
+};
+
+const findSpawnPosition = (map: number[][]): { x: number; y: number } => {
+  for (let attempts = 0; attempts < 100; attempts++) {
+    const x = 2 + Math.floor(Math.random() * (MAP_SIZE - 4));
+    const y = 2 + Math.floor(Math.random() * (MAP_SIZE - 4));
+    
+    if (map[y][x] === 0 && 
+        map[y-1][x] === 0 && map[y+1][x] === 0 && 
+        map[y][x-1] === 0 && map[y][x+1] === 0) {
+      return { x: x + 0.5, y: y + 0.5 };
+    }
+  }
+  return { x: 5.5, y: 5.5 };
+};
 
 export default function Index() {
   const [gameState, setGameState] = useState<GameState>('menu');
   const [player, setPlayer] = useState<PlayerState>({
-    x: 5,
-    y: 5,
+    x: 5.5,
+    y: 5.5,
     angle: 0,
     health: 100,
     coins: 0,
@@ -77,64 +164,62 @@ export default function Index() {
   const [bullets, setBullets] = useState<Bullet[]>([]);
   const [items, setItems] = useState<Item[]>([]);
   const [weapons, setWeapons] = useState<Weapon[]>(WEAPONS);
-  const [settings, setSettings] = useState({ volume: 50, graphics: 1 });
+  const [settings, setSettings] = useState<Settings>({
+    volume: 50,
+    graphics: 1,
+    sensitivity: 50,
+    showHints: true,
+    forceMobile: false,
+  });
   const [keys, setKeys] = useState<Set<string>>(new Set());
-  const [mouseX, setMouseX] = useState(0);
   const [isMobile, setIsMobile] = useState(false);
   const [joystickPos, setJoystickPos] = useState({ x: 0, y: 0 });
   const [lastShot, setLastShot] = useState(0);
+  const [isPointerLocked, setIsPointerLocked] = useState(false);
 
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const animationRef = useRef<number>();
+  const map = useRef<number[][]>(generateMap());
   const { toast } = useToast();
 
-  const map = useRef<number[][]>(
-    Array(MAP_SIZE).fill(0).map((_, y) =>
-      Array(MAP_SIZE).fill(0).map((_, x) => {
-        if (x === 0 || y === 0 || x === MAP_SIZE - 1 || y === MAP_SIZE - 1) return 1;
-        if (Math.random() < 0.15) return 1;
-        return 0;
-      })
-    )
-  );
-
   useEffect(() => {
-    setIsMobile(/iPhone|iPad|iPod|Android/i.test(navigator.userAgent));
-  }, []);
+    const isMobileDevice = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
+    setIsMobile(settings.forceMobile || isMobileDevice);
+  }, [settings.forceMobile]);
 
   const initGame = useCallback(() => {
+    map.current = generateMap();
+    
     const newEnemies: Enemy[] = [];
     const newItems: Item[] = [];
-
+    
+    const playerSpawn = findSpawnPosition(map.current);
+    
     for (let i = 0; i < 10; i++) {
-      let ex, ey;
-      do {
-        ex = Math.floor(Math.random() * (MAP_SIZE - 10)) + 5;
-        ey = Math.floor(Math.random() * (MAP_SIZE - 10)) + 5;
-      } while (map.current[ey][ex] !== 0 || (Math.abs(ex - 5) < 3 && Math.abs(ey - 5) < 3));
-
-      newEnemies.push({
-        id: i,
-        x: ex,
-        y: ey,
-        health: 50,
-        angle: 0,
-        shootTimer: 0,
-      });
+      const spawn = findSpawnPosition(map.current);
+      const dx = spawn.x - playerSpawn.x;
+      const dy = spawn.y - playerSpawn.y;
+      const dist = Math.sqrt(dx * dx + dy * dy);
+      
+      if (dist > 5) {
+        newEnemies.push({
+          id: i,
+          x: spawn.x,
+          y: spawn.y,
+          health: 50,
+          angle: 0,
+          shootTimer: 0,
+        });
+      }
     }
-
-    for (let i = 0; i < 15; i++) {
-      let ix, iy;
-      do {
-        ix = Math.floor(Math.random() * (MAP_SIZE - 4)) + 2;
-        iy = Math.floor(Math.random() * (MAP_SIZE - 4)) + 2;
-      } while (map.current[iy][ix] !== 0);
-
+    
+    for (let i = 0; i < 20; i++) {
+      const spawn = findSpawnPosition(map.current);
       const types: ('health' | 'ammo' | 'coin')[] = ['health', 'ammo', 'coin'];
       newItems.push({
         id: i,
-        x: ix + 0.5,
-        y: iy + 0.5,
+        x: spawn.x,
+        y: spawn.y,
         type: types[Math.floor(Math.random() * types.length)],
       });
     }
@@ -142,14 +227,25 @@ export default function Index() {
     setEnemies(newEnemies);
     setItems(newItems);
     setBullets([]);
-    setPlayer(prev => ({ ...prev, x: 5, y: 5, angle: 0, health: 100 }));
+    setPlayer(prev => ({ 
+      ...prev, 
+      x: playerSpawn.x, 
+      y: playerSpawn.y, 
+      angle: 0, 
+      health: 100 
+    }));
   }, []);
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (gameState === 'playing') {
         setKeys(prev => new Set(prev).add(e.key.toLowerCase()));
-        if (e.key === 'Escape') setGameState('paused');
+        if (e.key === 'Escape') {
+          setGameState('paused');
+          if (document.pointerLockElement) {
+            document.exitPointerLock();
+          }
+        }
         if (e.key >= '1' && e.key <= '3') {
           const weaponIndex = parseInt(e.key) - 1;
           if (weapons[weaponIndex].owned) {
@@ -168,29 +264,42 @@ export default function Index() {
     };
 
     const handleMouseMove = (e: MouseEvent) => {
-      if (gameState === 'playing' && !isMobile) {
-        setMouseX(e.movementX);
+      if (gameState === 'playing' && !isMobile && isPointerLocked) {
+        setPlayer(prev => ({
+          ...prev,
+          angle: prev.angle + e.movementX * (settings.sensitivity / 10000),
+        }));
       }
     };
 
     const handleClick = () => {
       if (gameState === 'playing' && !isMobile) {
-        shoot();
+        if (!isPointerLocked && canvasRef.current) {
+          canvasRef.current.requestPointerLock();
+        } else {
+          shoot();
+        }
       }
+    };
+
+    const handlePointerLockChange = () => {
+      setIsPointerLocked(document.pointerLockElement === canvasRef.current);
     };
 
     window.addEventListener('keydown', handleKeyDown);
     window.addEventListener('keyup', handleKeyUp);
     window.addEventListener('mousemove', handleMouseMove);
     window.addEventListener('click', handleClick);
+    document.addEventListener('pointerlockchange', handlePointerLockChange);
 
     return () => {
       window.removeEventListener('keydown', handleKeyDown);
       window.removeEventListener('keyup', handleKeyUp);
       window.removeEventListener('mousemove', handleMouseMove);
       window.removeEventListener('click', handleClick);
+      document.removeEventListener('pointerlockchange', handlePointerLockChange);
     };
-  }, [gameState, isMobile]);
+  }, [gameState, isMobile, isPointerLocked, settings.sensitivity]);
 
   const shoot = useCallback(() => {
     const now = Date.now();
@@ -245,7 +354,6 @@ export default function Index() {
         newX += dx;
         newY += dy;
       } else {
-        newAngle += mouseX * 0.003;
         const moveSpeed = 0.1;
         
         if (keys.has('w')) {
@@ -266,14 +374,13 @@ export default function Index() {
         }
       }
 
-      if (map.current[Math.floor(newY)][Math.floor(newX)] === 0) {
+      if (newX >= 0 && newX < MAP_SIZE && newY >= 0 && newY < MAP_SIZE &&
+          map.current[Math.floor(newY)][Math.floor(newX)] === 0) {
         return { ...prev, x: newX, y: newY, angle: newAngle };
       }
       
       return { ...prev, angle: newAngle };
     });
-
-    setMouseX(0);
 
     setBullets(prev => {
       const updated = prev.map(b => ({
@@ -306,7 +413,8 @@ export default function Index() {
           const newX = enemy.x + Math.cos(angleToPlayer) * moveSpeed;
           const newY = enemy.y + Math.sin(angleToPlayer) * moveSpeed;
           
-          if (map.current[Math.floor(newY)][Math.floor(newX)] === 0) {
+          if (newX >= 0 && newX < MAP_SIZE && newY >= 0 && newY < MAP_SIZE &&
+              map.current[Math.floor(newY)][Math.floor(newX)] === 0) {
             newEnemy = { ...newEnemy, x: newX, y: newY };
           }
         }
@@ -393,7 +501,7 @@ export default function Index() {
     });
 
     animationRef.current = requestAnimationFrame(gameLoop);
-  }, [gameState, player, keys, mouseX, bullets, items, enemies, isMobile, joystickPos, castRay, weapons, toast]);
+  }, [gameState, player, keys, bullets, items, enemies, isMobile, joystickPos, castRay, weapons, toast]);
 
   useEffect(() => {
     if (gameState === 'playing') {
@@ -415,7 +523,14 @@ export default function Index() {
     canvas.height = window.innerHeight;
 
     const FOV = Math.PI / 3;
-    const NUM_RAYS = settings.graphics === 2 ? 320 : settings.graphics === 1 ? 160 : 80;
+    const graphicsSettings = [
+      { rays: 80, detail: 0.8 },
+      { rays: 160, detail: 1 },
+      { rays: 320, detail: 1.2 },
+      { rays: 640, detail: 1.5 },
+    ];
+    const gfx = graphicsSettings[settings.graphics] || graphicsSettings[1];
+    const NUM_RAYS = gfx.rays;
     const MAX_DEPTH = 20;
 
     ctx.fillStyle = '#0a0a0f';
@@ -429,7 +544,7 @@ export default function Index() {
       const ray = castRay(rayAngle, MAX_DEPTH);
       
       const correctedDist = ray.dist * Math.cos(rayAngle - player.angle);
-      const wallHeight = (WALL_HEIGHT / correctedDist) * (canvas.height / 2);
+      const wallHeight = (WALL_HEIGHT / correctedDist) * (canvas.height / 2) * gfx.detail;
       
       const brightness = Math.max(0, 1 - correctedDist / MAX_DEPTH);
       const color = Math.floor(brightness * 150);
@@ -462,7 +577,7 @@ export default function Index() {
             dist,
             render: () => {
               const screenX = (relativeAngle / FOV + 0.5) * canvas.width;
-              const spriteHeight = (WALL_HEIGHT / dist) * (canvas.height / 2);
+              const spriteHeight = (WALL_HEIGHT / dist) * (canvas.height / 2) * gfx.detail;
               const brightness = Math.max(0, 1 - dist / MAX_DEPTH);
               
               ctx.fillStyle = `rgba(255, ${100 * brightness}, ${100 * brightness}, ${brightness})`;
@@ -506,7 +621,7 @@ export default function Index() {
             dist,
             render: () => {
               const screenX = (relativeAngle / FOV + 0.5) * canvas.width;
-              const spriteHeight = (WALL_HEIGHT / 2 / dist) * (canvas.height / 2);
+              const spriteHeight = (WALL_HEIGHT / 2 / dist) * (canvas.height / 2) * gfx.detail;
               
               const colors = {
                 health: 'rgba(0, 255, 0, 0.8)',
@@ -622,7 +737,7 @@ export default function Index() {
           
           <div className="space-y-6">
             <div className="space-y-2">
-              <label className="text-sm font-medium">Громкость: {settings.volume}%</label>
+              <Label>Громкость: {settings.volume}%</Label>
               <Slider
                 value={[settings.volume]}
                 onValueChange={([v]) => setSettings(s => ({ ...s, volume: v }))}
@@ -632,9 +747,19 @@ export default function Index() {
             </div>
 
             <div className="space-y-2">
-              <label className="text-sm font-medium">Качество графики</label>
-              <div className="grid grid-cols-3 gap-2">
-                {['Низкое', 'Среднее', 'Высокое'].map((q, i) => (
+              <Label>Чувствительность мыши: {settings.sensitivity}%</Label>
+              <Slider
+                value={[settings.sensitivity]}
+                onValueChange={([v]) => setSettings(s => ({ ...s, sensitivity: v }))}
+                max={100}
+                step={1}
+              />
+            </div>
+
+            <div className="space-y-2">
+              <Label>Качество графики</Label>
+              <div className="grid grid-cols-2 gap-2">
+                {['Низкое', 'Среднее', 'Высокое', 'Ультра'].map((q, i) => (
                   <Button
                     key={q}
                     variant={settings.graphics === i ? 'default' : 'outline'}
@@ -644,6 +769,24 @@ export default function Index() {
                   </Button>
                 ))}
               </div>
+            </div>
+
+            <div className="flex items-center justify-between">
+              <Label htmlFor="hints">Показывать подсказки</Label>
+              <Switch
+                id="hints"
+                checked={settings.showHints}
+                onCheckedChange={(checked) => setSettings(s => ({ ...s, showHints: checked }))}
+              />
+            </div>
+
+            <div className="flex items-center justify-between">
+              <Label htmlFor="mobile">Режим мобильного устройства</Label>
+              <Switch
+                id="mobile"
+                checked={settings.forceMobile}
+                onCheckedChange={(checked) => setSettings(s => ({ ...s, forceMobile: checked }))}
+              />
             </div>
           </div>
 
@@ -670,7 +813,7 @@ export default function Index() {
                 <div>
                   <h3 className="font-bold text-lg">{weapon.name}</h3>
                   <p className="text-sm text-muted-foreground">
-                    Урон: {weapon.damage} | Скорострельность: {1000/weapon.fireRate}/с
+                    Урон: {weapon.damage} | Скорострельность: {(1000/weapon.fireRate).toFixed(1)}/с
                   </p>
                 </div>
                 <div>
@@ -773,13 +916,16 @@ export default function Index() {
         </div>
       </div>
 
-      <div className="absolute top-4 right-4 bg-black/70 backdrop-blur px-4 py-2 rounded-lg text-sm">
-        <p>ESC - пауза</p>
-        {!isMobile && <p>WASD - движение</p>}
-        {!isMobile && <p>Мышь - взгляд</p>}
-        {!isMobile && <p>ЛКМ - стрелять</p>}
-        <p>1-3 - оружие</p>
-      </div>
+      {settings.showHints && (
+        <div className="absolute top-4 right-4 bg-black/70 backdrop-blur px-4 py-2 rounded-lg text-sm">
+          <p>ESC - пауза</p>
+          {!isMobile && !isPointerLocked && <p className="text-accent">Клик - захват мыши</p>}
+          {!isMobile && <p>WASD - движение</p>}
+          {!isMobile && <p>Мышь - взгляд</p>}
+          {!isMobile && <p>ЛКМ - стрелять</p>}
+          <p>1-3 - оружие</p>
+        </div>
+      )}
 
       {isMobile && (
         <>
