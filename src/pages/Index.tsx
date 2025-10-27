@@ -2,14 +2,27 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import { Slider } from '@/components/ui/slider';
+import { Switch } from '@/components/ui/switch';
+import { Label } from '@/components/ui/label';
 import Icon from '@/components/ui/icon';
 import { useToast } from '@/hooks/use-toast';
 
-type GameMode = 'menu' | 'playing' | 'inventory' | 'creative';
-type BlockType = 'air' | 'grass' | 'dirt' | 'stone' | 'wood' | 'planks' | 'leaves' | 'water' | 'sand' | 'cobblestone' | 'glass' | 'brick';
+type GameMode = 'menu' | 'playing' | 'inventory' | 'creative' | 'settings';
+type BlockType = 'air' | 'grass' | 'dirt' | 'stone' | 'wood' | 'planks' | 'leaves' | 'water' | 'sand' | 'cobblestone' | 'glass' | 'brick' | 'tnt';
 
 interface Block {
   type: BlockType;
+}
+
+interface TNTEntity {
+  x: number;
+  y: number;
+  z: number;
+  velX: number;
+  velY: number;
+  velZ: number;
+  fuse: number;
 }
 
 interface Player {
@@ -29,6 +42,13 @@ interface InventorySlot {
   count: number;
 }
 
+interface GraphicsSettings {
+  renderDistance: number;
+  fov: number;
+  rayDensity: number;
+  shadows: boolean;
+}
+
 const BLOCK_COLORS: Record<BlockType, string> = {
   air: 'transparent',
   grass: '#6B8E23',
@@ -42,9 +62,10 @@ const BLOCK_COLORS: Record<BlockType, string> = {
   cobblestone: '#6B6B6B',
   glass: '#87CEEB',
   brick: '#B22222',
+  tnt: '#FF0000',
 };
 
-const ALL_BLOCKS: BlockType[] = ['grass', 'dirt', 'stone', 'wood', 'planks', 'leaves', 'sand', 'cobblestone', 'glass', 'brick', 'water'];
+const ALL_BLOCKS: BlockType[] = ['grass', 'dirt', 'stone', 'wood', 'planks', 'leaves', 'sand', 'cobblestone', 'glass', 'brick', 'water', 'tnt'];
 
 const CHUNK_SIZE = 16;
 const WORLD_HEIGHT = 64;
@@ -130,6 +151,13 @@ export default function Index() {
   const [inventory, setInventory] = useState<InventorySlot[]>(
     Array(36).fill(null).map(() => ({ type: null, count: 0 }))
   );
+  const [tntEntities, setTntEntities] = useState<TNTEntity[]>([]);
+  const [graphics, setGraphics] = useState<GraphicsSettings>({
+    renderDistance: 10,
+    fov: 75,
+    rayDensity: 2,
+    shadows: true,
+  });
   const [keys, setKeys] = useState<Set<string>>(new Set());
   const [isMobile, setIsMobile] = useState(false);
   const [joystickPos, setJoystickPos] = useState({ x: 0, y: 0 });
@@ -183,8 +211,45 @@ export default function Index() {
     }
   }, []);
 
+  const igniteTNT = useCallback((x: number, y: number, z: number) => {
+    setTntEntities(prev => [...prev, {
+      x: x + 0.5,
+      y: y + 0.5,
+      z: z + 0.5,
+      velX: (Math.random() - 0.5) * 0.02,
+      velY: 0.2,
+      velZ: (Math.random() - 0.5) * 0.02,
+      fuse: 80,
+    }]);
+    setBlock(x, y, z, { type: 'air' });
+  }, [setBlock]);
+
+  const explodeTNT = useCallback((x: number, y: number, z: number) => {
+    const radius = 4;
+    for (let dx = -radius; dx <= radius; dx++) {
+      for (let dy = -radius; dy <= radius; dy++) {
+        for (let dz = -radius; dz <= radius; dz++) {
+          const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
+          if (dist <= radius) {
+            const bx = Math.floor(x + dx);
+            const by = Math.floor(y + dy);
+            const bz = Math.floor(z + dz);
+            const block = getBlock(bx, by, bz);
+            
+            if (block.type === 'tnt') {
+              igniteTNT(bx, by, bz);
+            } else if (block.type !== 'air' && Math.random() > dist / radius * 0.5) {
+              setBlock(bx, by, bz, { type: 'air' });
+            }
+          }
+        }
+      }
+    }
+  }, [getBlock, setBlock, igniteTNT]);
+
   const startGame = (mode: 'survival' | 'creative') => {
     worldRef.current.clear();
+    setTntEntities([]);
     const startInventory = Array(36).fill(null).map(() => ({ type: null, count: 0 }));
     
     if (mode === 'creative') {
@@ -239,7 +304,7 @@ export default function Index() {
         if (e.key >= '1' && e.key <= '9') {
           setPlayer(prev => ({ ...prev, selectedSlot: parseInt(e.key) - 1 }));
         }
-      } else if ((gameMode === 'inventory' || gameMode === 'creative') && (e.key === 'Escape' || e.key === 'e' || e.key === 'E' || e.key === 'c' || e.key === 'C')) {
+      } else if ((gameMode === 'inventory' || gameMode === 'creative' || gameMode === 'settings') && (e.key === 'Escape' || e.key === 'e' || e.key === 'E' || e.key === 'c' || e.key === 'C')) {
         setGameMode('playing');
       }
     };
@@ -257,7 +322,7 @@ export default function Index() {
         setPlayer(prev => ({
           ...prev,
           angleX: prev.angleX + e.movementX * 0.002,
-          angleY: Math.max(-Math.PI / 2, Math.min(Math.PI / 2, prev.angleY + e.movementY * 0.002)),
+          angleY: Math.max(-Math.PI / 2, Math.min(Math.PI / 2, prev.angleY - e.movementY * 0.002)),
         }));
       }
     };
@@ -304,7 +369,7 @@ export default function Index() {
   const raycast = useCallback((maxDist: number = 5): { x: number; y: number; z: number; face: number } | null => {
     const step = 0.1;
     const dirX = Math.cos(player.angleY) * Math.cos(player.angleX);
-    const dirY = Math.sin(player.angleY);
+    const dirY = -Math.sin(player.angleY);
     const dirZ = Math.cos(player.angleY) * Math.sin(player.angleX);
 
     for (let i = 0; i < maxDist / step; i++) {
@@ -334,6 +399,12 @@ export default function Index() {
     const hit = raycast();
     if (hit) {
       const block = getBlock(hit.x, hit.y, hit.z);
+      
+      if (block.type === 'tnt') {
+        igniteTNT(hit.x, hit.y, hit.z);
+        return;
+      }
+      
       setBlock(hit.x, hit.y, hit.z, { type: 'air' });
       
       if (player.mode === 'survival') {
@@ -350,7 +421,7 @@ export default function Index() {
         setInventory([...inventory]);
       }
     }
-  }, [raycast, getBlock, setBlock, inventory, player.mode]);
+  }, [raycast, getBlock, setBlock, inventory, player.mode, igniteTNT]);
 
   const placeBlock = useCallback(() => {
     const hit = raycast();
@@ -408,7 +479,7 @@ export default function Index() {
 
       if (isMobile) {
         newAngleX += lookJoystick.x * 0.03;
-        newAngleY = Math.max(-Math.PI / 2, Math.min(Math.PI / 2, newAngleY + lookJoystick.y * 0.03));
+        newAngleY = Math.max(-Math.PI / 2, Math.min(Math.PI / 2, newAngleY - lookJoystick.y * 0.03));
         
         const moveSpeed = 0.1;
         newX += Math.cos(newAngleX) * moveSpeed * joystickPos.y;
@@ -500,8 +571,34 @@ export default function Index() {
       return { ...prev, x: newX, y: newY, z: newZ, velY: newVelY, angleX: newAngleX, angleY: newAngleY };
     });
 
+    setTntEntities(prev => {
+      const updated: TNTEntity[] = [];
+      prev.forEach(tnt => {
+        tnt.fuse--;
+        if (tnt.fuse <= 0) {
+          explodeTNT(tnt.x, tnt.y, tnt.z);
+        } else {
+          tnt.velY -= 0.02;
+          tnt.x += tnt.velX;
+          tnt.y += tnt.velY;
+          tnt.z += tnt.velZ;
+          
+          const block = getBlock(Math.floor(tnt.x), Math.floor(tnt.y - 0.5), Math.floor(tnt.z));
+          if (block.type !== 'air') {
+            tnt.velY = 0;
+            tnt.velX *= 0.8;
+            tnt.velZ *= 0.8;
+            tnt.y = Math.floor(tnt.y) + 0.5;
+          }
+          
+          updated.push(tnt);
+        }
+      });
+      return updated;
+    });
+
     animationRef.current = requestAnimationFrame(gameLoop);
-  }, [gameMode, keys, isMobile, joystickPos, lookJoystick, getBlock]);
+  }, [gameMode, keys, isMobile, joystickPos, lookJoystick, getBlock, explodeTNT]);
 
   useEffect(() => {
     if (gameMode === 'playing') {
@@ -528,9 +625,10 @@ export default function Index() {
     ctx.fillStyle = gradient;
     ctx.fillRect(0, 0, canvas.width, canvas.height);
 
-    const FOV = Math.PI / 2.5;
-    const NUM_RAYS_H = isMobile ? 80 : 160;
-    const NUM_RAYS_V = isMobile ? 60 : 120;
+    const FOV = (graphics.fov * Math.PI) / 180;
+    const density = graphics.rayDensity;
+    const NUM_RAYS_H = isMobile ? 60 * density : 100 * density;
+    const NUM_RAYS_V = isMobile ? 45 * density : 75 * density;
 
     for (let rayY = 0; rayY < NUM_RAYS_V; rayY++) {
       for (let rayX = 0; rayX < NUM_RAYS_H; rayX++) {
@@ -538,7 +636,7 @@ export default function Index() {
         const angleV = player.angleY - (FOV * 0.6) / 2 + (rayY / NUM_RAYS_V) * (FOV * 0.6);
 
         const dirX = Math.cos(angleV) * Math.cos(angleH);
-        const dirY = Math.sin(angleV);
+        const dirY = -Math.sin(angleV);
         const dirZ = Math.cos(angleV) * Math.sin(angleH);
 
         const step = 0.1;
@@ -546,7 +644,7 @@ export default function Index() {
         let hitDist = 0;
         let hitFace = 0;
 
-        for (let i = 0; i < 150; i++) {
+        for (let i = 0; i < graphics.renderDistance * 10; i++) {
           const dist = i * step;
           const x = Math.floor(player.x + dirX * dist);
           const y = Math.floor(player.y + dirY * dist);
@@ -570,10 +668,15 @@ export default function Index() {
         }
 
         if (hitBlock) {
-          const brightness = Math.max(0.3, 1 - hitDist / 15);
-          const faceBrightness = hitFace === 0 ? 1 : hitFace === 1 ? 0.6 : 0.8;
+          const brightness = Math.max(0.3, 1 - hitDist / graphics.renderDistance);
+          const faceBrightness = graphics.shadows ? (hitFace === 0 ? 1 : hitFace === 1 ? 0.6 : 0.8) : 0.9;
           
-          const color = BLOCK_COLORS[hitBlock.type];
+          let color = BLOCK_COLORS[hitBlock.type];
+          if (hitBlock.type === 'tnt') {
+            const stripe = Math.floor((rayX + rayY) / 4) % 2 === 0;
+            color = stripe ? '#FF0000' : '#FFFFFF';
+          }
+          
           const rgb = parseInt(color.slice(1), 16);
           const r = ((rgb >> 16) & 255) * brightness * faceBrightness;
           const g = ((rgb >> 8) & 255) * brightness * faceBrightness;
@@ -590,6 +693,32 @@ export default function Index() {
       }
     }
 
+    tntEntities.forEach(tnt => {
+      const dx = tnt.x - player.x;
+      const dy = tnt.y - player.y;
+      const dz = tnt.z - player.z;
+      const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
+      
+      if (dist < graphics.renderDistance) {
+        const angleToTnt = Math.atan2(dz, dx) - player.angleX;
+        const angleToTntV = Math.atan2(-dy, Math.sqrt(dx * dx + dz * dz)) - player.angleY;
+        
+        const screenX = canvas.width / 2 + (angleToTnt / FOV) * canvas.width;
+        const screenY = canvas.height / 2 + (angleToTntV / (FOV * 0.6)) * canvas.height;
+        
+        const size = Math.max(20, 200 / dist);
+        const flash = tnt.fuse % 20 < 10;
+        
+        ctx.fillStyle = flash ? '#FFFFFF' : '#FF0000';
+        ctx.fillRect(screenX - size / 2, screenY - size / 2, size, size);
+        
+        ctx.fillStyle = '#000000';
+        ctx.font = `${size / 2}px monospace`;
+        ctx.textAlign = 'center';
+        ctx.fillText(Math.ceil(tnt.fuse / 20).toString(), screenX, screenY + size / 4);
+      }
+    });
+
     const crosshairSize = 20;
     ctx.strokeStyle = '#fff';
     ctx.lineWidth = 3;
@@ -602,29 +731,111 @@ export default function Index() {
     ctx.lineTo(canvas.width / 2, canvas.height / 2 + crosshairSize / 2);
     ctx.stroke();
 
-  }, [player, gameMode, getBlock, isMobile]);
+  }, [player, gameMode, getBlock, isMobile, graphics, tntEntities]);
 
   if (gameMode === 'menu') {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-gradient-to-b from-green-700 to-green-900 p-4">
-        <Card className="p-8 max-w-md w-full space-y-6 bg-card/90 backdrop-blur">
-          <div className="text-center space-y-2">
-            <h1 className="text-6xl font-bold text-primary" style={{ fontFamily: 'monospace' }}>
+      <div className="min-h-screen flex items-center justify-center bg-gradient-to-b from-green-700 via-green-800 to-green-900 p-4">
+        <div className="absolute inset-0 opacity-10 bg-[url('data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNjQiIGhlaWdodD0iNjQiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+PHJlY3Qgd2lkdGg9IjY0IiBoZWlnaHQ9IjY0IiBmaWxsPSJub25lIi8+PHJlY3QgeD0iMCIgeT0iMCIgd2lkdGg9IjE2IiBoZWlnaHQ9IjE2IiBmaWxsPSIjMDAwIi8+PHJlY3QgeD0iMzIiIHk9IjAiIHdpZHRoPSIxNiIgaGVpZ2h0PSIxNiIgZmlsbD0iIzAwMCIvPjxyZWN0IHg9IjE2IiB5PSIxNiIgd2lkdGg9IjE2IiBoZWlnaHQ9IjE2IiBmaWxsPSIjMDAwIi8+PHJlY3QgeD0iNDgiIHk9IjE2IiB3aWR0aD0iMTYiIGhlaWdodD0iMTYiIGZpbGw9IiMwMDAiLz48cmVjdCB4PSIwIiB5PSIzMiIgd2lkdGg9IjE2IiBoZWlnaHQ9IjE2IiBmaWxsPSIjMDAwIi8+PHJlY3QgeD0iMzIiIHk9IjMyIiB3aWR0aD0iMTYiIGhlaWdodD0iMTYiIGZpbGw9IiMwMDAiLz48cmVjdCB4PSIxNiIgeT0iNDgiIHdpZHRoPSIxNiIgaGVpZ2h0PSIxNiIgZmlsbD0iIzAwMCIvPjxyZWN0IHg9IjQ4IiB5PSI0OCIgd2lkdGg9IjE2IiBoZWlnaHQ9IjE2IiBmaWxsPSIjMDAwIi8+PC9zdmc+')]" />
+        <Card className="p-10 max-w-lg w-full space-y-8 bg-card/95 backdrop-blur-sm shadow-2xl border-4 border-primary/20">
+          <div className="text-center space-y-3">
+            <h1 className="text-7xl font-bold text-primary drop-shadow-lg" style={{ fontFamily: 'monospace', letterSpacing: '0.1em' }}>
               MINECRAFT
             </h1>
-            <p className="text-muted-foreground">Воксельный мир</p>
+            <p className="text-xl text-muted-foreground font-semibold">Воксельный мир</p>
           </div>
           
-          <div className="space-y-3">
-            <Button onClick={() => startGame('survival')} className="w-full h-12 text-lg">
-              <Icon name="Sword" className="mr-2" size={20} />
-              Выживание
+          <div className="space-y-4">
+            <Button onClick={() => startGame('survival')} className="w-full h-14 text-xl font-bold shadow-lg hover:shadow-xl transition-all">
+              <Icon name="Sword" className="mr-3" size={24} />
+              Режим выживания
             </Button>
-            <Button onClick={() => startGame('creative')} className="w-full h-12 text-lg" variant="secondary">
-              <Icon name="Sparkles" className="mr-2" size={20} />
-              Креатив
+            <Button onClick={() => startGame('creative')} className="w-full h-14 text-xl font-bold shadow-lg hover:shadow-xl transition-all" variant="secondary">
+              <Icon name="Sparkles" className="mr-3" size={24} />
+              Креативный режим
+            </Button>
+            <Button onClick={() => setGameMode('settings')} className="w-full h-14 text-xl font-bold shadow-lg hover:shadow-xl transition-all" variant="outline">
+              <Icon name="Settings" className="mr-3" size={24} />
+              Настройки графики
             </Button>
           </div>
+          
+          <div className="text-center text-sm text-muted-foreground pt-4 border-t">
+            <p>Управление: WASD, Мышь, ЛКМ/ПКМ</p>
+          </div>
+        </Card>
+      </div>
+    );
+  }
+
+  if (gameMode === 'settings') {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-gradient-to-b from-slate-700 to-slate-900 p-4">
+        <Card className="p-8 max-w-2xl w-full space-y-6">
+          <h2 className="text-4xl font-bold text-center mb-6">Настройки графики</h2>
+          
+          <div className="space-y-6">
+            <div className="space-y-3">
+              <div className="flex justify-between items-center">
+                <Label className="text-lg">Дальность прорисовки: {graphics.renderDistance} блоков</Label>
+              </div>
+              <Slider
+                value={[graphics.renderDistance]}
+                onValueChange={(val) => setGraphics(prev => ({ ...prev, renderDistance: val[0] }))}
+                min={5}
+                max={20}
+                step={1}
+                className="w-full"
+              />
+              <p className="text-sm text-muted-foreground">Чем больше — тем дальше видно, но медленнее</p>
+            </div>
+
+            <div className="space-y-3">
+              <div className="flex justify-between items-center">
+                <Label className="text-lg">Поле зрения (FOV): {graphics.fov}°</Label>
+              </div>
+              <Slider
+                value={[graphics.fov]}
+                onValueChange={(val) => setGraphics(prev => ({ ...prev, fov: val[0] }))}
+                min={60}
+                max={110}
+                step={5}
+                className="w-full"
+              />
+              <p className="text-sm text-muted-foreground">Стандарт: 75°, широкий обзор: 90°+</p>
+            </div>
+
+            <div className="space-y-3">
+              <div className="flex justify-between items-center">
+                <Label className="text-lg">Качество: {graphics.rayDensity === 1 ? 'Низкое' : graphics.rayDensity === 2 ? 'Среднее' : 'Высокое'}</Label>
+              </div>
+              <Slider
+                value={[graphics.rayDensity]}
+                onValueChange={(val) => setGraphics(prev => ({ ...prev, rayDensity: val[0] }))}
+                min={1}
+                max={3}
+                step={1}
+                className="w-full"
+              />
+              <p className="text-sm text-muted-foreground">Влияет на детализацию изображения</p>
+            </div>
+
+            <div className="flex items-center justify-between p-4 border rounded-lg">
+              <div>
+                <Label className="text-lg">Тени</Label>
+                <p className="text-sm text-muted-foreground">Освещение граней блоков</p>
+              </div>
+              <Switch
+                checked={graphics.shadows}
+                onCheckedChange={(val) => setGraphics(prev => ({ ...prev, shadows: val }))}
+              />
+            </div>
+          </div>
+
+          <Button onClick={() => setGameMode('menu')} className="w-full h-12 text-lg mt-8">
+            <Icon name="ArrowLeft" className="mr-2" size={20} />
+            Назад в меню
+          </Button>
         </Card>
       </div>
     );
@@ -652,7 +863,11 @@ export default function Index() {
                   <>
                     <div
                       className="w-full h-2/3 rounded"
-                      style={{ backgroundColor: BLOCK_COLORS[slot.type] }}
+                      style={{ 
+                        backgroundColor: slot.type === 'tnt' ? '#FF0000' : BLOCK_COLORS[slot.type],
+                        backgroundImage: slot.type === 'tnt' ? 'linear-gradient(45deg, #FF0000 25%, #FFFFFF 25%, #FFFFFF 50%, #FF0000 50%, #FF0000 75%, #FFFFFF 75%)' : 'none',
+                        backgroundSize: '8px 8px'
+                      }}
                     />
                     <span className="text-xs mt-1 font-bold">{slot.count}</span>
                   </>
@@ -699,9 +914,13 @@ export default function Index() {
                   >
                     <div
                       className="w-full h-3/4 rounded"
-                      style={{ backgroundColor: BLOCK_COLORS[blockType] }}
+                      style={{ 
+                        backgroundColor: blockType === 'tnt' ? '#FF0000' : BLOCK_COLORS[blockType],
+                        backgroundImage: blockType === 'tnt' ? 'linear-gradient(45deg, #FF0000 25%, #FFFFFF 25%, #FFFFFF 50%, #FF0000 50%, #FF0000 75%, #FFFFFF 75%)' : 'none',
+                        backgroundSize: '12px 12px'
+                      }}
                     />
-                    <span className="text-xs mt-1 capitalize">{blockType}</span>
+                    <span className="text-xs mt-1 capitalize font-bold">{blockType}</span>
                   </div>
                 ))}
               </div>
@@ -718,7 +937,11 @@ export default function Index() {
                       <>
                         <div
                           className="w-full h-2/3 rounded"
-                          style={{ backgroundColor: BLOCK_COLORS[slot.type] }}
+                          style={{ 
+                            backgroundColor: slot.type === 'tnt' ? '#FF0000' : BLOCK_COLORS[slot.type],
+                            backgroundImage: slot.type === 'tnt' ? 'linear-gradient(45deg, #FF0000 25%, #FFFFFF 25%, #FFFFFF 50%, #FF0000 50%, #FF0000 75%, #FFFFFF 75%)' : 'none',
+                            backgroundSize: '8px 8px'
+                          }}
                         />
                         <span className="text-xs mt-1 font-bold">{slot.count}</span>
                       </>
@@ -761,7 +984,11 @@ export default function Index() {
               <>
                 <div
                   className="w-9 h-9 rounded"
-                  style={{ backgroundColor: BLOCK_COLORS[slot.type] }}
+                  style={{ 
+                    backgroundColor: slot.type === 'tnt' ? '#FF0000' : BLOCK_COLORS[slot.type],
+                    backgroundImage: slot.type === 'tnt' ? 'linear-gradient(45deg, #FF0000 25%, #FFFFFF 25%, #FFFFFF 50%, #FF0000 50%, #FF0000 75%, #FFFFFF 75%)' : 'none',
+                    backgroundSize: '6px 6px'
+                  }}
                 />
                 <span className="text-xs text-white font-bold">{slot.count}</span>
               </>
@@ -784,7 +1011,7 @@ export default function Index() {
             <p>Shift - бег</p>
           </>
         )}
-        <p>ЛКМ - разрушить</p>
+        <p>ЛКМ - разрушить/поджечь ТНТ</p>
         <p>ПКМ - поставить</p>
         <p>E - инвентарь</p>
         <p>C - креатив меню</p>
