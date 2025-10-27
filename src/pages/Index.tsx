@@ -1,257 +1,204 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
-import { Slider } from '@/components/ui/slider';
-import { Switch } from '@/components/ui/switch';
-import { Label } from '@/components/ui/label';
 import Icon from '@/components/ui/icon';
 import { useToast } from '@/hooks/use-toast';
 
-type GameState = 'menu' | 'playing' | 'settings' | 'shop' | 'paused' | 'gameOver';
+type GameMode = 'menu' | 'playing' | 'inventory' | 'crafting';
+type BlockType = 'air' | 'grass' | 'dirt' | 'stone' | 'wood' | 'planks' | 'leaves' | 'water' | 'sand';
 
-interface PlayerState {
+interface Block {
+  type: BlockType;
+}
+
+interface Player {
   x: number;
   y: number;
-  angle: number;
-  health: number;
-  coins: number;
-  ammo: number;
-  maxAmmo: number;
-  currentWeapon: number;
+  z: number;
+  velY: number;
+  angleX: number;
+  angleY: number;
+  selectedSlot: number;
+  onGround: boolean;
 }
 
-interface Enemy {
-  id: number;
-  x: number;
-  y: number;
-  health: number;
-  angle: number;
-  shootTimer: number;
+interface InventorySlot {
+  type: BlockType | null;
+  count: number;
 }
 
-interface Bullet {
-  id: number;
-  x: number;
-  y: number;
-  angle: number;
-  fromPlayer: boolean;
-}
-
-interface Item {
-  id: number;
-  x: number;
-  y: number;
-  type: 'health' | 'ammo' | 'coin';
-}
-
-interface Weapon {
-  name: string;
-  damage: number;
-  fireRate: number;
-  ammoPerShot: number;
-  price: number;
-  owned: boolean;
-}
-
-interface Settings {
-  volume: number;
-  graphics: number;
-  sensitivity: number;
-  showHints: boolean;
-  forceMobile: boolean;
-}
-
-const WEAPONS: Weapon[] = [
-  { name: 'Пистолет', damage: 10, fireRate: 500, ammoPerShot: 1, price: 0, owned: true },
-  { name: 'Дробовик', damage: 30, fireRate: 800, ammoPerShot: 2, price: 50, owned: false },
-  { name: 'Пулемёт', damage: 15, fireRate: 150, ammoPerShot: 1, price: 100, owned: false },
-];
-
-const MAP_SIZE = 50;
-const WALL_HEIGHT = 64;
-
-const generateMap = (): number[][] => {
-  const map = Array(MAP_SIZE).fill(0).map(() => Array(MAP_SIZE).fill(1));
-  
-  const rooms: Array<{x: number, y: number, w: number, h: number}> = [];
-  const numRooms = 8;
-  
-  for (let i = 0; i < numRooms; i++) {
-    const w = 5 + Math.floor(Math.random() * 6);
-    const h = 5 + Math.floor(Math.random() * 6);
-    const x = 2 + Math.floor(Math.random() * (MAP_SIZE - w - 4));
-    const y = 2 + Math.floor(Math.random() * (MAP_SIZE - h - 4));
-    
-    let overlaps = false;
-    for (const room of rooms) {
-      if (!(x + w < room.x || x > room.x + room.w || y + h < room.y || y > room.y + room.h)) {
-        overlaps = true;
-        break;
-      }
-    }
-    
-    if (!overlaps) {
-      for (let ry = y; ry < y + h; ry++) {
-        for (let rx = x; rx < x + w; rx++) {
-          map[ry][rx] = 0;
-        }
-      }
-      rooms.push({ x, y, w, h });
-    }
-  }
-  
-  for (let i = 0; i < rooms.length - 1; i++) {
-    const room1 = rooms[i];
-    const room2 = rooms[i + 1];
-    
-    const cx1 = Math.floor(room1.x + room1.w / 2);
-    const cy1 = Math.floor(room1.y + room1.h / 2);
-    const cx2 = Math.floor(room2.x + room2.w / 2);
-    const cy2 = Math.floor(room2.y + room2.h / 2);
-    
-    let x = cx1;
-    while (x !== cx2) {
-      map[cy1][x] = 0;
-      x += x < cx2 ? 1 : -1;
-    }
-    
-    let y = cy1;
-    while (y !== cy2) {
-      map[y][cx2] = 0;
-      y += y < cy2 ? 1 : -1;
-    }
-  }
-  
-  if (rooms.length > 0) {
-    const startRoom = rooms[0];
-    for (let ry = startRoom.y; ry < startRoom.y + startRoom.h; ry++) {
-      for (let rx = startRoom.x; rx < startRoom.x + startRoom.w; rx++) {
-        map[ry][rx] = 0;
-      }
-    }
-  }
-  
-  return map;
+const BLOCK_COLORS: Record<BlockType, string> = {
+  air: 'transparent',
+  grass: '#6B8E23',
+  dirt: '#8B4513',
+  stone: '#808080',
+  wood: '#8B4513',
+  planks: '#DEB887',
+  leaves: '#228B22',
+  water: '#4169E1',
+  sand: '#F4A460',
 };
 
-const findSpawnPosition = (map: number[][]): { x: number; y: number } => {
-  for (let attempts = 0; attempts < 100; attempts++) {
-    const x = 2 + Math.floor(Math.random() * (MAP_SIZE - 4));
-    const y = 2 + Math.floor(Math.random() * (MAP_SIZE - 4));
-    
-    if (map[y][x] === 0 && 
-        map[y-1][x] === 0 && map[y+1][x] === 0 && 
-        map[y][x-1] === 0 && map[y][x+1] === 0) {
-      return { x: x + 0.5, y: y + 0.5 };
+const CHUNK_SIZE = 16;
+const WORLD_HEIGHT = 64;
+const RENDER_DISTANCE = 3;
+
+const generateTerrain = (chunkX: number, chunkZ: number): Block[][][] => {
+  const chunk: Block[][][] = Array(CHUNK_SIZE).fill(null).map(() =>
+    Array(WORLD_HEIGHT).fill(null).map(() =>
+      Array(CHUNK_SIZE).fill(null).map(() => ({ type: 'air' as BlockType }))
+    )
+  );
+
+  for (let x = 0; x < CHUNK_SIZE; x++) {
+    for (let z = 0; z < CHUNK_SIZE; z++) {
+      const worldX = chunkX * CHUNK_SIZE + x;
+      const worldZ = chunkZ * CHUNK_SIZE + z;
+      
+      const height = Math.floor(32 + Math.sin(worldX * 0.1) * 5 + Math.cos(worldZ * 0.1) * 5);
+      
+      for (let y = 0; y < height; y++) {
+        if (y < 30) {
+          chunk[x][y][z] = { type: 'stone' };
+        } else if (y < height - 1) {
+          chunk[x][y][z] = { type: 'dirt' };
+        } else {
+          chunk[x][y][z] = { type: 'grass' };
+        }
+      }
+      
+      if (Math.random() < 0.02 && height < WORLD_HEIGHT - 5) {
+        for (let y = height; y < height + 4; y++) {
+          chunk[x][y][z] = { type: 'wood' };
+        }
+        for (let dx = -2; dx <= 2; dx++) {
+          for (let dz = -2; dz <= 2; dz++) {
+            for (let dy = 0; dy < 3; dy++) {
+              const nx = x + dx;
+              const nz = z + dz;
+              const ny = height + 4 + dy;
+              if (nx >= 0 && nx < CHUNK_SIZE && nz >= 0 && nz < CHUNK_SIZE && ny < WORLD_HEIGHT) {
+                if (Math.abs(dx) + Math.abs(dz) <= 2) {
+                  chunk[nx][ny][nz] = { type: 'leaves' };
+                }
+              }
+            }
+          }
+        }
+      }
     }
   }
-  return { x: 5.5, y: 5.5 };
+
+  return chunk;
 };
 
 export default function Index() {
-  const [gameState, setGameState] = useState<GameState>('menu');
-  const [player, setPlayer] = useState<PlayerState>({
-    x: 5.5,
-    y: 5.5,
-    angle: 0,
-    health: 100,
-    coins: 0,
-    ammo: 50,
-    maxAmmo: 50,
-    currentWeapon: 0,
+  const [gameMode, setGameMode] = useState<GameMode>('menu');
+  const [player, setPlayer] = useState<Player>({
+    x: 8,
+    y: 40,
+    z: 8,
+    velY: 0,
+    angleX: 0,
+    angleY: 0,
+    selectedSlot: 0,
+    onGround: false,
   });
-  const [enemies, setEnemies] = useState<Enemy[]>([]);
-  const [bullets, setBullets] = useState<Bullet[]>([]);
-  const [items, setItems] = useState<Item[]>([]);
-  const [weapons, setWeapons] = useState<Weapon[]>(WEAPONS);
-  const [settings, setSettings] = useState<Settings>({
-    volume: 50,
-    graphics: 1,
-    sensitivity: 50,
-    showHints: true,
-    forceMobile: false,
-  });
+  const [inventory, setInventory] = useState<InventorySlot[]>(
+    Array(9).fill(null).map(() => ({ type: null, count: 0 }))
+  );
   const [keys, setKeys] = useState<Set<string>>(new Set());
   const [isMobile, setIsMobile] = useState(false);
   const [joystickPos, setJoystickPos] = useState({ x: 0, y: 0 });
-  const [lastShot, setLastShot] = useState(0);
   const [isPointerLocked, setIsPointerLocked] = useState(false);
 
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const animationRef = useRef<number>();
-  const map = useRef<number[][]>(generateMap());
+  const worldRef = useRef<Map<string, Block[][][]>>(new Map());
   const { toast } = useToast();
 
   useEffect(() => {
-    const isMobileDevice = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
-    setIsMobile(settings.forceMobile || isMobileDevice);
-  }, [settings.forceMobile]);
-
-  const initGame = useCallback(() => {
-    map.current = generateMap();
-    
-    const newEnemies: Enemy[] = [];
-    const newItems: Item[] = [];
-    
-    const playerSpawn = findSpawnPosition(map.current);
-    
-    for (let i = 0; i < 10; i++) {
-      const spawn = findSpawnPosition(map.current);
-      const dx = spawn.x - playerSpawn.x;
-      const dy = spawn.y - playerSpawn.y;
-      const dist = Math.sqrt(dx * dx + dy * dy);
-      
-      if (dist > 5) {
-        newEnemies.push({
-          id: i,
-          x: spawn.x,
-          y: spawn.y,
-          health: 50,
-          angle: 0,
-          shootTimer: 0,
-        });
-      }
-    }
-    
-    for (let i = 0; i < 20; i++) {
-      const spawn = findSpawnPosition(map.current);
-      const types: ('health' | 'ammo' | 'coin')[] = ['health', 'ammo', 'coin'];
-      newItems.push({
-        id: i,
-        x: spawn.x,
-        y: spawn.y,
-        type: types[Math.floor(Math.random() * types.length)],
-      });
-    }
-
-    setEnemies(newEnemies);
-    setItems(newItems);
-    setBullets([]);
-    setPlayer(prev => ({ 
-      ...prev, 
-      x: playerSpawn.x, 
-      y: playerSpawn.y, 
-      angle: 0, 
-      health: 100 
-    }));
+    setIsMobile(/iPhone|iPad|iPod|Android/i.test(navigator.userAgent));
   }, []);
+
+  const getChunkKey = (chunkX: number, chunkZ: number) => `${chunkX},${chunkZ}`;
+
+  const getBlock = useCallback((x: number, y: number, z: number): Block => {
+    const chunkX = Math.floor(x / CHUNK_SIZE);
+    const chunkZ = Math.floor(z / CHUNK_SIZE);
+    const key = getChunkKey(chunkX, chunkZ);
+    
+    if (!worldRef.current.has(key)) {
+      worldRef.current.set(key, generateTerrain(chunkX, chunkZ));
+    }
+    
+    const chunk = worldRef.current.get(key)!;
+    const localX = ((x % CHUNK_SIZE) + CHUNK_SIZE) % CHUNK_SIZE;
+    const localZ = ((z % CHUNK_SIZE) + CHUNK_SIZE) % CHUNK_SIZE;
+    
+    if (y < 0 || y >= WORLD_HEIGHT) return { type: 'air' };
+    
+    return chunk[localX][y][localZ];
+  }, []);
+
+  const setBlock = useCallback((x: number, y: number, z: number, block: Block) => {
+    const chunkX = Math.floor(x / CHUNK_SIZE);
+    const chunkZ = Math.floor(z / CHUNK_SIZE);
+    const key = getChunkKey(chunkX, chunkZ);
+    
+    if (!worldRef.current.has(key)) {
+      worldRef.current.set(key, generateTerrain(chunkX, chunkZ));
+    }
+    
+    const chunk = worldRef.current.get(key)!;
+    const localX = ((x % CHUNK_SIZE) + CHUNK_SIZE) % CHUNK_SIZE;
+    const localZ = ((z % CHUNK_SIZE) + CHUNK_SIZE) % CHUNK_SIZE;
+    
+    if (y >= 0 && y < WORLD_HEIGHT) {
+      chunk[localX][y][localZ] = block;
+    }
+  }, []);
+
+  const startGame = () => {
+    worldRef.current.clear();
+    setPlayer({
+      x: 8,
+      y: 40,
+      z: 8,
+      velY: 0,
+      angleX: 0,
+      angleY: 0,
+      selectedSlot: 0,
+      onGround: false,
+    });
+    setInventory(Array(9).fill(null).map(() => ({ type: null, count: 0 })));
+    setGameMode('playing');
+  };
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (gameState === 'playing') {
+      if (gameMode === 'playing') {
         setKeys(prev => new Set(prev).add(e.key.toLowerCase()));
+        
         if (e.key === 'Escape') {
-          setGameState('paused');
+          setGameMode('menu');
           if (document.pointerLockElement) {
             document.exitPointerLock();
           }
         }
-        if (e.key >= '1' && e.key <= '3') {
-          const weaponIndex = parseInt(e.key) - 1;
-          if (weapons[weaponIndex].owned) {
-            setPlayer(prev => ({ ...prev, currentWeapon: weaponIndex }));
+        
+        if (e.key === 'e') {
+          setGameMode('inventory');
+          if (document.pointerLockElement) {
+            document.exitPointerLock();
           }
         }
+        
+        if (e.key >= '1' && e.key <= '9') {
+          setPlayer(prev => ({ ...prev, selectedSlot: parseInt(e.key) - 1 }));
+        }
+      } else if (gameMode === 'inventory' && e.key === 'Escape') {
+        setGameMode('playing');
       }
     };
 
@@ -264,22 +211,31 @@ export default function Index() {
     };
 
     const handleMouseMove = (e: MouseEvent) => {
-      if (gameState === 'playing' && !isMobile && isPointerLocked) {
+      if (gameMode === 'playing' && !isMobile && isPointerLocked) {
         setPlayer(prev => ({
           ...prev,
-          angle: prev.angle + e.movementX * (settings.sensitivity / 10000),
+          angleX: prev.angleX + e.movementX * 0.002,
+          angleY: Math.max(-Math.PI / 2, Math.min(Math.PI / 2, prev.angleY - e.movementY * 0.002)),
         }));
       }
     };
 
-    const handleClick = () => {
-      if (gameState === 'playing' && !isMobile) {
+    const handleClick = (e: MouseEvent) => {
+      if (gameMode === 'playing' && !isMobile) {
         if (!isPointerLocked && canvasRef.current) {
           canvasRef.current.requestPointerLock();
         } else {
-          shoot();
+          if (e.button === 0) {
+            breakBlock();
+          } else if (e.button === 2) {
+            placeBlock();
+          }
         }
       }
+    };
+
+    const handleContextMenu = (e: Event) => {
+      e.preventDefault();
     };
 
     const handlePointerLockChange = () => {
@@ -289,237 +245,216 @@ export default function Index() {
     window.addEventListener('keydown', handleKeyDown);
     window.addEventListener('keyup', handleKeyUp);
     window.addEventListener('mousemove', handleMouseMove);
-    window.addEventListener('click', handleClick);
+    window.addEventListener('mousedown', handleClick);
+    window.addEventListener('contextmenu', handleContextMenu);
     document.addEventListener('pointerlockchange', handlePointerLockChange);
 
     return () => {
       window.removeEventListener('keydown', handleKeyDown);
       window.removeEventListener('keyup', handleKeyUp);
       window.removeEventListener('mousemove', handleMouseMove);
-      window.removeEventListener('click', handleClick);
+      window.removeEventListener('mousedown', handleClick);
+      window.removeEventListener('contextmenu', handleContextMenu);
       document.removeEventListener('pointerlockchange', handlePointerLockChange);
     };
-  }, [gameState, isMobile, isPointerLocked, settings.sensitivity]);
+  }, [gameMode, isMobile, isPointerLocked]);
 
-  const shoot = useCallback(() => {
-    const now = Date.now();
-    const weapon = weapons[player.currentWeapon];
-    
-    if (now - lastShot < weapon.fireRate || player.ammo < weapon.ammoPerShot) return;
+  const raycast = useCallback((maxDist: number = 5): { x: number; y: number; z: number; face: number } | null => {
+    const step = 0.1;
+    const dirX = Math.cos(player.angleY) * Math.cos(player.angleX);
+    const dirY = Math.sin(player.angleY);
+    const dirZ = Math.cos(player.angleY) * Math.sin(player.angleX);
 
-    const shootSound = new Audio('data:audio/wav;base64,UklGRhIAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQA=');
-    shootSound.volume = settings.volume / 100;
-    shootSound.play().catch(() => {});
+    for (let i = 0; i < maxDist / step; i++) {
+      const dist = i * step;
+      const x = Math.floor(player.x + dirX * dist);
+      const y = Math.floor(player.y + dirY * dist);
+      const z = Math.floor(player.z + dirZ * dist);
 
-    setLastShot(now);
-    setPlayer(prev => ({ ...prev, ammo: Math.max(0, prev.ammo - weapon.ammoPerShot) }));
-
-    const newBullet: Bullet = {
-      id: Date.now(),
-      x: player.x,
-      y: player.y,
-      angle: player.angle,
-      fromPlayer: true,
-    };
-
-    setBullets(prev => [...prev, newBullet]);
-  }, [player, weapons, lastShot, settings.volume]);
-
-  const castRay = useCallback((angle: number, maxDist: number = 20): { dist: number; hitWall: boolean } => {
-    const rayX = Math.cos(angle);
-    const rayY = Math.sin(angle);
-    
-    for (let i = 0; i < maxDist * 10; i++) {
-      const dist = i * 0.1;
-      const x = player.x + rayX * dist;
-      const y = player.y + rayY * dist;
-      
-      if (x < 0 || y < 0 || x >= MAP_SIZE || y >= MAP_SIZE || map.current[Math.floor(y)][Math.floor(x)] === 1) {
-        return { dist, hitWall: true };
+      const block = getBlock(x, y, z);
+      if (block.type !== 'air') {
+        const prevX = Math.floor(player.x + dirX * (dist - step));
+        const prevY = Math.floor(player.y + dirY * (dist - step));
+        const prevZ = Math.floor(player.z + dirZ * (dist - step));
+        
+        let face = 0;
+        if (prevX !== x) face = dirX > 0 ? 1 : 2;
+        else if (prevY !== y) face = dirY > 0 ? 3 : 4;
+        else if (prevZ !== z) face = dirZ > 0 ? 5 : 6;
+        
+        return { x, y, z, face };
       }
     }
-    
-    return { dist: maxDist, hitWall: false };
-  }, [player.x, player.y]);
+    return null;
+  }, [player, getBlock]);
+
+  const breakBlock = useCallback(() => {
+    const hit = raycast();
+    if (hit) {
+      const block = getBlock(hit.x, hit.y, hit.z);
+      setBlock(hit.x, hit.y, hit.z, { type: 'air' });
+      
+      const slot = inventory.find(s => s.type === block.type && s.count < 64);
+      if (slot) {
+        slot.count++;
+      } else {
+        const emptySlot = inventory.find(s => s.type === null);
+        if (emptySlot) {
+          emptySlot.type = block.type;
+          emptySlot.count = 1;
+        }
+      }
+      setInventory([...inventory]);
+    }
+  }, [raycast, getBlock, setBlock, inventory]);
+
+  const placeBlock = useCallback(() => {
+    const hit = raycast();
+    if (hit && inventory[player.selectedSlot].type && inventory[player.selectedSlot].count > 0) {
+      const faceOffsets = [
+        [0, 0, 0],
+        [1, 0, 0],
+        [-1, 0, 0],
+        [0, 1, 0],
+        [0, -1, 0],
+        [0, 0, 1],
+        [0, 0, -1],
+      ];
+      
+      const offset = faceOffsets[hit.face];
+      const newX = hit.x + offset[0];
+      const newY = hit.y + offset[1];
+      const newZ = hit.z + offset[2];
+      
+      const playerBox = {
+        minX: Math.floor(player.x - 0.3),
+        maxX: Math.floor(player.x + 0.3),
+        minY: Math.floor(player.y - 1.8),
+        maxY: Math.floor(player.y + 0.2),
+        minZ: Math.floor(player.z - 0.3),
+        maxZ: Math.floor(player.z + 0.3),
+      };
+      
+      if (newX < playerBox.minX || newX > playerBox.maxX ||
+          newY < playerBox.minY || newY > playerBox.maxY ||
+          newZ < playerBox.minZ || newZ > playerBox.maxZ) {
+        setBlock(newX, newY, newZ, { type: inventory[player.selectedSlot].type! });
+        inventory[player.selectedSlot].count--;
+        if (inventory[player.selectedSlot].count === 0) {
+          inventory[player.selectedSlot].type = null;
+        }
+        setInventory([...inventory]);
+      }
+    }
+  }, [raycast, setBlock, inventory, player]);
 
   const gameLoop = useCallback(() => {
-    if (gameState !== 'playing') return;
+    if (gameMode !== 'playing') return;
 
     setPlayer(prev => {
       let newX = prev.x;
       let newY = prev.y;
-      let newAngle = prev.angle;
+      let newZ = prev.z;
+      let newVelY = prev.velY;
+      let newAngleX = prev.angleX;
 
       if (isMobile) {
-        newAngle += joystickPos.x * 0.05;
-        const moveSpeed = 0.03;
-        const dx = Math.cos(newAngle) * moveSpeed * joystickPos.y;
-        const dy = Math.sin(newAngle) * moveSpeed * joystickPos.y;
-        newX += dx;
-        newY += dy;
+        newAngleX += joystickPos.x * 0.05;
+        const moveSpeed = 0.1;
+        newX += Math.cos(newAngleX) * moveSpeed * joystickPos.y;
+        newZ += Math.sin(newAngleX) * moveSpeed * joystickPos.y;
       } else {
-        const baseSpeed = 0.05;
-        const moveSpeed = keys.has('shift') ? baseSpeed * 1.8 : baseSpeed;
+        const baseSpeed = 0.1;
+        const moveSpeed = keys.has('shift') ? baseSpeed * 1.5 : baseSpeed;
         
         if (keys.has('w')) {
-          newX += Math.cos(newAngle) * moveSpeed;
-          newY += Math.sin(newAngle) * moveSpeed;
+          newX += Math.cos(prev.angleX) * moveSpeed;
+          newZ += Math.sin(prev.angleX) * moveSpeed;
         }
         if (keys.has('s')) {
-          newX -= Math.cos(newAngle) * moveSpeed;
-          newY -= Math.sin(newAngle) * moveSpeed;
+          newX -= Math.cos(prev.angleX) * moveSpeed;
+          newZ -= Math.sin(prev.angleX) * moveSpeed;
         }
         if (keys.has('a')) {
-          newX += Math.cos(newAngle - Math.PI / 2) * moveSpeed;
-          newY += Math.sin(newAngle - Math.PI / 2) * moveSpeed;
+          newX += Math.cos(prev.angleX - Math.PI / 2) * moveSpeed;
+          newZ += Math.sin(prev.angleX - Math.PI / 2) * moveSpeed;
         }
         if (keys.has('d')) {
-          newX += Math.cos(newAngle + Math.PI / 2) * moveSpeed;
-          newY += Math.sin(newAngle + Math.PI / 2) * moveSpeed;
+          newX += Math.cos(prev.angleX + Math.PI / 2) * moveSpeed;
+          newZ += Math.sin(prev.angleX + Math.PI / 2) * moveSpeed;
         }
       }
 
-      if (newX >= 0 && newX < MAP_SIZE && newY >= 0 && newY < MAP_SIZE &&
-          map.current[Math.floor(newY)][Math.floor(newX)] === 0) {
-        return { ...prev, x: newX, y: newY, angle: newAngle };
-      }
-      
-      return { ...prev, angle: newAngle };
-    });
-
-    setBullets(prev => {
-      const updated = prev.map(b => ({
-        ...b,
-        x: b.x + Math.cos(b.angle) * 0.3,
-        y: b.y + Math.sin(b.angle) * 0.3,
-      })).filter(b => {
-        if (b.x < 0 || b.y < 0 || b.x >= MAP_SIZE || b.y >= MAP_SIZE) return false;
-        if (map.current[Math.floor(b.y)][Math.floor(b.x)] === 1) return false;
-        return true;
-      });
-
-      return updated;
-    });
-
-    setEnemies(prev => {
-      return prev.map(enemy => {
-        const dx = player.x - enemy.x;
-        const dy = player.y - enemy.y;
-        const dist = Math.sqrt(dx * dx + dy * dy);
-        const angleToPlayer = Math.atan2(dy, dx);
-
-        const ray = castRay(angleToPlayer, dist);
-        const canSeePlayer = !ray.hitWall && dist < 15;
-
-        let newEnemy = { ...enemy, angle: angleToPlayer };
-
-        if (canSeePlayer && dist > 2) {
-          const moveSpeed = 0.03;
-          const newX = enemy.x + Math.cos(angleToPlayer) * moveSpeed;
-          const newY = enemy.y + Math.sin(angleToPlayer) * moveSpeed;
-          
-          if (newX >= 0 && newX < MAP_SIZE && newY >= 0 && newY < MAP_SIZE &&
-              map.current[Math.floor(newY)][Math.floor(newX)] === 0) {
-            newEnemy = { ...newEnemy, x: newX, y: newY };
-          }
-        }
-
-        if (canSeePlayer && newEnemy.shootTimer <= 0) {
-          const newBullet: Bullet = {
-            id: Date.now() + Math.random(),
-            x: newEnemy.x,
-            y: newEnemy.y,
-            angle: angleToPlayer,
-            fromPlayer: false,
-          };
-          setBullets(b => [...b, newBullet]);
-          newEnemy.shootTimer = 60;
-        } else if (newEnemy.shootTimer > 0) {
-          newEnemy.shootTimer--;
-        }
-
-        return newEnemy;
-      });
-    });
-
-    bullets.forEach(bullet => {
-      if (bullet.fromPlayer) {
-        setEnemies(prev => {
-          let enemyHit = false;
-          const updated = prev.map(enemy => {
-            const dist = Math.sqrt((bullet.x - enemy.x) ** 2 + (bullet.y - enemy.y) ** 2);
-            if (dist < 0.5 && !enemyHit) {
-              enemyHit = true;
-              const newHealth = enemy.health - weapons[player.currentWeapon].damage;
-              if (newHealth <= 0) {
-                const coinDrop = Math.floor(Math.random() * 3) + 1;
-                setPlayer(p => ({ ...p, coins: p.coins + coinDrop }));
-                setItems(i => [...i, {
-                  id: Date.now() + Math.random(),
-                  x: enemy.x,
-                  y: enemy.y,
-                  type: 'coin',
-                }]);
-                return null;
-              }
-              return { ...enemy, health: newHealth };
-            }
-            return enemy;
-          }).filter(e => e !== null) as Enemy[];
-
-          if (enemyHit) {
-            setBullets(b => b.filter(b => b.id !== bullet.id));
-          }
-
-          return updated;
-        });
-      } else {
-        const dist = Math.sqrt((bullet.x - player.x) ** 2 + (bullet.y - player.y) ** 2);
-        if (dist < 0.5) {
-          setPlayer(p => {
-            const newHealth = p.health - 10;
-            if (newHealth <= 0) {
-              setGameState('gameOver');
-            }
-            return { ...p, health: Math.max(0, newHealth) };
-          });
-          setBullets(b => b.filter(b => b.id !== bullet.id));
-        }
-      }
-    });
-
-    items.forEach(item => {
-      const dist = Math.sqrt((item.x - player.x) ** 2 + (item.y - player.y) ** 2);
-      if (dist < 0.7) {
-        setItems(prev => prev.filter(i => i.id !== item.id));
+      const checkCollision = (x: number, y: number, z: number): boolean => {
+        const checks = [
+          [x - 0.3, y - 1.8, z - 0.3],
+          [x + 0.3, y - 1.8, z - 0.3],
+          [x - 0.3, y - 1.8, z + 0.3],
+          [x + 0.3, y - 1.8, z + 0.3],
+          [x - 0.3, y - 0.9, z - 0.3],
+          [x + 0.3, y - 0.9, z - 0.3],
+          [x - 0.3, y - 0.9, z + 0.3],
+          [x + 0.3, y - 0.9, z + 0.3],
+          [x - 0.3, y, z - 0.3],
+          [x + 0.3, y, z - 0.3],
+          [x - 0.3, y, z + 0.3],
+          [x + 0.3, y, z + 0.3],
+        ];
         
-        if (item.type === 'health') {
-          setPlayer(p => ({ ...p, health: Math.min(100, p.health + 25) }));
-          toast({ title: '+25 HP' });
-        } else if (item.type === 'ammo') {
-          setPlayer(p => ({ ...p, ammo: Math.min(p.maxAmmo, p.ammo + 20) }));
-          toast({ title: '+20 патронов' });
-        } else if (item.type === 'coin') {
-          setPlayer(p => ({ ...p, coins: p.coins + 1 }));
+        for (const [cx, cy, cz] of checks) {
+          const block = getBlock(Math.floor(cx), Math.floor(cy), Math.floor(cz));
+          if (block.type !== 'air') return true;
+        }
+        return false;
+      };
+
+      if (!checkCollision(newX, newY, prev.z)) {
+        newX = newX;
+      } else {
+        newX = prev.x;
+      }
+
+      if (!checkCollision(prev.x, newY, newZ)) {
+        newZ = newZ;
+      } else {
+        newZ = prev.z;
+      }
+
+      newVelY -= 0.02;
+      newY += newVelY;
+
+      if (checkCollision(newX, newY, newZ)) {
+        if (newVelY < 0) {
+          newY = Math.floor(newY) + 1;
+          newVelY = 0;
+          
+          if (keys.has(' ') && !isMobile) {
+            newVelY = 0.15;
+          }
+        } else {
+          newY = Math.ceil(newY);
+          newVelY = 0;
         }
       }
+
+      return { ...prev, x: newX, y: newY, z: newZ, velY: newVelY, angleX: newAngleX };
     });
 
     animationRef.current = requestAnimationFrame(gameLoop);
-  }, [gameState, player, keys, bullets, items, enemies, isMobile, joystickPos, castRay, weapons, toast]);
+  }, [gameMode, keys, isMobile, joystickPos, getBlock]);
 
   useEffect(() => {
-    if (gameState === 'playing') {
+    if (gameMode === 'playing') {
       animationRef.current = requestAnimationFrame(gameLoop);
     }
     return () => {
       if (animationRef.current) cancelAnimationFrame(animationRef.current);
     };
-  }, [gameState, gameLoop]);
+  }, [gameMode, gameLoop]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
-    if (!canvas || gameState !== 'playing') return;
+    if (!canvas || gameMode !== 'playing') return;
 
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
@@ -527,393 +462,135 @@ export default function Index() {
     canvas.width = window.innerWidth;
     canvas.height = window.innerHeight;
 
-    const FOV = Math.PI / 3;
-    const graphicsSettings = [
-      { rays: 120, detail: 1 },
-      { rays: 240, detail: 1 },
-      { rays: 480, detail: 1 },
-      { rays: 960, detail: 1 },
-    ];
-    const gfx = graphicsSettings[settings.graphics] || graphicsSettings[1];
-    const NUM_RAYS = gfx.rays;
-    const MAX_DEPTH = 20;
+    const gradient = ctx.createLinearGradient(0, 0, 0, canvas.height);
+    gradient.addColorStop(0, '#87CEEB');
+    gradient.addColorStop(1, '#E0F6FF');
+    ctx.fillStyle = gradient;
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
 
-    ctx.fillStyle = '#1a1a2e';
-    ctx.fillRect(0, 0, canvas.width, canvas.height / 2);
+    const FOV = Math.PI / 2.5;
+    const NUM_RAYS_H = 120;
+    const NUM_RAYS_V = 80;
 
-    ctx.fillStyle = '#0a0a14';
-    ctx.fillRect(0, canvas.height / 2, canvas.width, canvas.height / 2);
+    for (let rayY = 0; rayY < NUM_RAYS_V; rayY++) {
+      for (let rayX = 0; rayX < NUM_RAYS_H; rayX++) {
+        const angleH = player.angleX - FOV / 2 + (rayX / NUM_RAYS_H) * FOV;
+        const angleV = player.angleY - (FOV * 0.6) / 2 + (rayY / NUM_RAYS_V) * (FOV * 0.6);
 
-    for (let i = 0; i < NUM_RAYS; i++) {
-      const rayAngle = player.angle - FOV / 2 + (i / NUM_RAYS) * FOV;
-      const ray = castRay(rayAngle, MAX_DEPTH);
-      
-      if (!ray.hitWall) continue;
-      
-      const correctedDist = ray.dist * Math.cos(rayAngle - player.angle);
-      const wallHeight = (WALL_HEIGHT / Math.max(correctedDist, 0.1)) * (canvas.height / 2);
-      
-      const brightness = Math.max(0, 1 - correctedDist / MAX_DEPTH);
-      const color = Math.floor(brightness * 180);
-      
-      ctx.fillStyle = `rgb(${color}, ${Math.floor(color * 0.7)}, ${Math.floor(color * 0.5)})`;
-      ctx.fillRect(
-        (i / NUM_RAYS) * canvas.width,
-        canvas.height / 2 - wallHeight / 2,
-        Math.ceil(canvas.width / NUM_RAYS) + 1,
-        wallHeight
-      );
-    }
+        const dirX = Math.cos(angleV) * Math.cos(angleH);
+        const dirY = Math.sin(angleV);
+        const dirZ = Math.cos(angleV) * Math.sin(angleH);
 
-    const spritesToRender: Array<{ dist: number; render: () => void }> = [];
+        const step = 0.1;
+        let hitBlock: Block | null = null;
+        let hitDist = 0;
+        let hitFace = 0;
 
-    enemies.forEach(enemy => {
-      const dx = enemy.x - player.x;
-      const dy = enemy.y - player.y;
-      const dist = Math.sqrt(dx * dx + dy * dy);
-      const angleToEnemy = Math.atan2(dy, dx);
-      let relativeAngle = angleToEnemy - player.angle;
-      
-      while (relativeAngle > Math.PI) relativeAngle -= 2 * Math.PI;
-      while (relativeAngle < -Math.PI) relativeAngle += 2 * Math.PI;
+        for (let i = 0; i < 100; i++) {
+          const dist = i * step;
+          const x = Math.floor(player.x + dirX * dist);
+          const y = Math.floor(player.y + dirY * dist);
+          const z = Math.floor(player.z + dirZ * dist);
 
-      if (Math.abs(relativeAngle) < FOV / 2 + 0.5) {
-        const ray = castRay(angleToEnemy, dist);
-        if (!ray.hitWall || ray.dist > dist) {
-          spritesToRender.push({
-            dist,
-            render: () => {
-              const screenX = (relativeAngle / FOV + 0.5) * canvas.width;
-              const spriteHeight = (WALL_HEIGHT / dist) * (canvas.height / 2) * gfx.detail;
-              const brightness = Math.max(0, 1 - dist / MAX_DEPTH);
-              
-              ctx.fillStyle = `rgba(255, ${100 * brightness}, ${100 * brightness}, ${brightness})`;
-              ctx.fillRect(
-                screenX - spriteHeight / 4,
-                canvas.height / 2 - spriteHeight / 2,
-                spriteHeight / 2,
-                spriteHeight
-              );
-              
-              ctx.fillStyle = `rgba(200, ${80 * brightness}, ${80 * brightness}, ${brightness * 0.8})`;
-              ctx.beginPath();
-              ctx.arc(
-                screenX,
-                canvas.height / 2 - spriteHeight / 4,
-                spriteHeight / 6,
-                0,
-                Math.PI * 2
-              );
-              ctx.fill();
-            },
-          });
+          const block = getBlock(x, y, z);
+          if (block.type !== 'air') {
+            hitBlock = block;
+            hitDist = dist;
+            
+            const prevX = Math.floor(player.x + dirX * (dist - step));
+            const prevY = Math.floor(player.y + dirY * (dist - step));
+            const prevZ = Math.floor(player.z + dirZ * (dist - step));
+            
+            if (prevY !== y) hitFace = dirY > 0 ? 1 : 0;
+            else if (prevX !== x) hitFace = 2;
+            else if (prevZ !== z) hitFace = 3;
+            
+            break;
+          }
         }
-      }
-    });
 
-    items.forEach(item => {
-      const dx = item.x - player.x;
-      const dy = item.y - player.y;
-      const dist = Math.sqrt(dx * dx + dy * dy);
-      const angleToItem = Math.atan2(dy, dx);
-      let relativeAngle = angleToItem - player.angle;
-      
-      while (relativeAngle > Math.PI) relativeAngle -= 2 * Math.PI;
-      while (relativeAngle < -Math.PI) relativeAngle += 2 * Math.PI;
+        if (hitBlock) {
+          const brightness = Math.max(0.3, 1 - hitDist / 10);
+          const faceBrightness = hitFace === 0 ? 1 : hitFace === 1 ? 0.7 : 0.85;
+          
+          const color = BLOCK_COLORS[hitBlock.type];
+          const rgb = parseInt(color.slice(1), 16);
+          const r = ((rgb >> 16) & 255) * brightness * faceBrightness;
+          const g = ((rgb >> 8) & 255) * brightness * faceBrightness;
+          const b = (rgb & 255) * brightness * faceBrightness;
 
-      if (Math.abs(relativeAngle) < FOV / 2 + 0.5) {
-        const ray = castRay(angleToItem, dist);
-        if (!ray.hitWall || ray.dist > dist) {
-          spritesToRender.push({
-            dist,
-            render: () => {
-              const screenX = (relativeAngle / FOV + 0.5) * canvas.width;
-              const spriteHeight = (WALL_HEIGHT / 2 / dist) * (canvas.height / 2) * gfx.detail;
-              
-              const colors = {
-                health: 'rgba(0, 255, 0, 0.8)',
-                ammo: 'rgba(255, 255, 0, 0.8)',
-                coin: 'rgba(255, 215, 0, 0.8)',
-              };
-              
-              ctx.fillStyle = colors[item.type];
-              ctx.fillRect(
-                screenX - spriteHeight / 2,
-                canvas.height / 2 - spriteHeight / 2,
-                spriteHeight,
-                spriteHeight
-              );
-            },
-          });
-        }
-      }
-    });
-
-    spritesToRender.sort((a, b) => b.dist - a.dist).forEach(sprite => sprite.render());
-
-    const miniMapSize = 150;
-    const miniMapScale = miniMapSize / MAP_SIZE;
-    ctx.fillStyle = 'rgba(0, 0, 0, 0.5)';
-    ctx.fillRect(10, 10, miniMapSize, miniMapSize);
-
-    for (let y = 0; y < MAP_SIZE; y++) {
-      for (let x = 0; x < MAP_SIZE; x++) {
-        if (map.current[y][x] === 1) {
-          ctx.fillStyle = '#555';
+          ctx.fillStyle = `rgb(${r}, ${g}, ${b})`;
           ctx.fillRect(
-            10 + x * miniMapScale,
-            10 + y * miniMapScale,
-            miniMapScale,
-            miniMapScale
+            (rayX / NUM_RAYS_H) * canvas.width,
+            (rayY / NUM_RAYS_V) * canvas.height,
+            Math.ceil(canvas.width / NUM_RAYS_H) + 1,
+            Math.ceil(canvas.height / NUM_RAYS_V) + 1
           );
         }
       }
     }
 
-    enemies.forEach(enemy => {
-      const dx = enemy.x - player.x;
-      const dy = enemy.y - player.y;
-      const dist = Math.sqrt(dx * dx + dy * dy);
-      const angleToEnemy = Math.atan2(dy, dx);
-      const ray = castRay(angleToEnemy, dist);
-      
-      if (!ray.hitWall || ray.dist > dist) {
-        ctx.fillStyle = '#f00';
-        ctx.fillRect(
-          10 + enemy.x * miniMapScale - 2,
-          10 + enemy.y * miniMapScale - 2,
-          4,
-          4
-        );
-      }
-    });
+    const crosshairSize = 20;
+    ctx.strokeStyle = '#fff';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(canvas.width / 2 - crosshairSize / 2, canvas.height / 2);
+    ctx.lineTo(canvas.width / 2 + crosshairSize / 2, canvas.height / 2);
+    ctx.moveTo(canvas.width / 2, canvas.height / 2 - crosshairSize / 2);
+    ctx.lineTo(canvas.width / 2, canvas.height / 2 + crosshairSize / 2);
+    ctx.stroke();
 
-    ctx.fillStyle = '#0ff';
-    ctx.fillRect(
-      10 + player.x * miniMapScale - 3,
-      10 + player.y * miniMapScale - 3,
-      6,
-      6
-    );
+  }, [player, gameMode, getBlock]);
 
-    const weaponSprites = {
-      0: { w: 120, h: 100, color: '#888' },
-      1: { w: 150, h: 120, color: '#a66' },
-      2: { w: 180, h: 90, color: '#66a' },
-    };
-    
-    const weaponSprite = weaponSprites[player.currentWeapon as keyof typeof weaponSprites];
-    const weaponX = canvas.width / 2 - weaponSprite.w / 2;
-    const weaponY = canvas.height - weaponSprite.h - 20;
-    
-    ctx.fillStyle = weaponSprite.color;
-    ctx.fillRect(weaponX, weaponY, weaponSprite.w, weaponSprite.h);
-    
-    ctx.fillStyle = '#444';
-    ctx.fillRect(weaponX + 20, weaponY + 20, weaponSprite.w - 40, 30);
-    
-    ctx.fillStyle = '#222';
-    ctx.fillRect(weaponX + weaponSprite.w / 2 - 15, weaponY - 20, 30, 40);
-
-  }, [player, enemies, items, gameState, settings, castRay]);
-
-  const startGame = () => {
-    initGame();
-    setGameState('playing');
-  };
-
-  if (gameState === 'menu') {
+  if (gameMode === 'menu') {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-gradient-to-b from-background to-card p-4">
-        <Card className="p-8 max-w-md w-full space-y-6 bg-card/80 backdrop-blur border-primary/20">
+      <div className="min-h-screen flex items-center justify-center bg-gradient-to-b from-green-700 to-green-900 p-4">
+        <Card className="p-8 max-w-md w-full space-y-6 bg-card/90 backdrop-blur">
           <div className="text-center space-y-2">
-            <h1 className="text-6xl font-bold text-primary tracking-wider" style={{ fontFamily: 'monospace' }}>
-              DOOM
+            <h1 className="text-6xl font-bold text-primary" style={{ fontFamily: 'monospace' }}>
+              MINECRAFT
             </h1>
-            <p className="text-muted-foreground">Классический 3D шутер</p>
+            <p className="text-muted-foreground">Воксельное выживание</p>
           </div>
           
           <div className="space-y-3">
-            <Button onClick={startGame} className="w-full h-12 text-lg" variant="default">
-              Новая игра
+            <Button onClick={startGame} className="w-full h-12 text-lg">
+              Начать игру
             </Button>
-            <Button onClick={() => setGameState('shop')} className="w-full h-12 text-lg" variant="secondary">
-              <Icon name="ShoppingCart" className="mr-2" size={20} />
-              Магазин оружия
-            </Button>
-            <Button onClick={() => setGameState('settings')} className="w-full h-12 text-lg" variant="outline">
-              <Icon name="Settings" className="mr-2" size={20} />
-              Настройки
-            </Button>
-          </div>
-
-          <div className="text-center text-sm text-muted-foreground pt-4 border-t border-border">
-            <p>Монеты: {player.coins} 🪙</p>
           </div>
         </Card>
       </div>
     );
   }
 
-  if (gameState === 'settings') {
+  if (gameMode === 'inventory') {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-gradient-to-b from-background to-card p-4">
-        <Card className="p-8 max-w-md w-full space-y-6">
-          <h2 className="text-3xl font-bold text-primary">Настройки</h2>
-          
-          <div className="space-y-6">
-            <div className="space-y-2">
-              <Label>Громкость: {settings.volume}%</Label>
-              <Slider
-                value={[settings.volume]}
-                onValueChange={([v]) => setSettings(s => ({ ...s, volume: v }))}
-                max={100}
-                step={1}
-              />
-            </div>
-
-            <div className="space-y-2">
-              <Label>Чувствительность мыши: {settings.sensitivity}%</Label>
-              <Slider
-                value={[settings.sensitivity]}
-                onValueChange={([v]) => setSettings(s => ({ ...s, sensitivity: v }))}
-                max={100}
-                step={1}
-              />
-            </div>
-
-            <div className="space-y-2">
-              <Label>Качество графики</Label>
-              <div className="grid grid-cols-2 gap-2">
-                {['Низкое', 'Среднее', 'Высокое', 'Ультра'].map((q, i) => (
-                  <Button
-                    key={q}
-                    variant={settings.graphics === i ? 'default' : 'outline'}
-                    onClick={() => setSettings(s => ({ ...s, graphics: i }))}
-                  >
-                    {q}
-                  </Button>
-                ))}
-              </div>
-            </div>
-
-            <div className="flex items-center justify-between">
-              <Label htmlFor="hints">Показывать подсказки</Label>
-              <Switch
-                id="hints"
-                checked={settings.showHints}
-                onCheckedChange={(checked) => setSettings(s => ({ ...s, showHints: checked }))}
-              />
-            </div>
-
-            <div className="flex items-center justify-between">
-              <Label htmlFor="mobile">Режим мобильного устройства</Label>
-              <Switch
-                id="mobile"
-                checked={settings.forceMobile}
-                onCheckedChange={(checked) => setSettings(s => ({ ...s, forceMobile: checked }))}
-              />
-            </div>
-          </div>
-
-          <Button onClick={() => setGameState('menu')} className="w-full" variant="secondary">
-            Назад
-          </Button>
-        </Card>
-      </div>
-    );
-  }
-
-  if (gameState === 'shop') {
-    return (
-      <div className="min-h-screen flex items-center justify-center bg-gradient-to-b from-background to-card p-4">
+      <div className="min-h-screen flex items-center justify-center bg-black/50 backdrop-blur p-4">
         <Card className="p-8 max-w-2xl w-full space-y-6">
-          <div className="flex items-center justify-between">
-            <h2 className="text-3xl font-bold text-primary">Магазин оружия</h2>
-            <div className="text-xl font-bold">🪙 {player.coins}</div>
-          </div>
+          <h2 className="text-3xl font-bold text-center">Инвентарь</h2>
           
-          <div className="space-y-3">
-            {weapons.map((weapon, index) => (
-              <Card key={weapon.name} className="p-4 flex items-center justify-between">
-                <div>
-                  <h3 className="font-bold text-lg">{weapon.name}</h3>
-                  <p className="text-sm text-muted-foreground">
-                    Урон: {weapon.damage} | Скорострельность: {(1000/weapon.fireRate).toFixed(1)}/с
-                  </p>
-                </div>
-                <div>
-                  {weapon.owned ? (
-                    <Button variant="outline" disabled>
-                      <Icon name="Check" size={16} className="mr-2" />
-                      Куплено
-                    </Button>
-                  ) : (
-                    <Button
-                      onClick={() => {
-                        if (player.coins >= weapon.price) {
-                          setPlayer(p => ({ ...p, coins: p.coins - weapon.price }));
-                          setWeapons(w => w.map((wp, i) =>
-                            i === index ? { ...wp, owned: true } : wp
-                          ));
-                          toast({ title: `${weapon.name} куплен!` });
-                        } else {
-                          toast({ title: 'Недостаточно монет', variant: 'destructive' });
-                        }
-                      }}
-                      disabled={player.coins < weapon.price}
-                    >
-                      {weapon.price} 🪙
-                    </Button>
-                  )}
-                </div>
-              </Card>
+          <div className="grid grid-cols-9 gap-2">
+            {inventory.map((slot, index) => (
+              <div
+                key={index}
+                className="aspect-square border-2 border-border bg-muted flex flex-col items-center justify-center p-2"
+              >
+                {slot.type && (
+                  <>
+                    <div
+                      className="w-full h-2/3 rounded"
+                      style={{ backgroundColor: BLOCK_COLORS[slot.type] }}
+                    />
+                    <span className="text-xs mt-1">{slot.count}</span>
+                  </>
+                )}
+              </div>
             ))}
           </div>
 
-          <Button onClick={() => setGameState('menu')} className="w-full" variant="secondary">
-            Назад
+          <Button onClick={() => setGameMode('playing')} className="w-full">
+            Закрыть (ESC)
           </Button>
-        </Card>
-      </div>
-    );
-  }
-
-  if (gameState === 'paused') {
-    return (
-      <div className="min-h-screen flex items-center justify-center bg-black/80 backdrop-blur">
-        <Card className="p-8 max-w-md w-full space-y-4">
-          <h2 className="text-3xl font-bold text-center text-primary">Пауза</h2>
-          <div className="space-y-2">
-            <Button onClick={() => setGameState('playing')} className="w-full">
-              Продолжить
-            </Button>
-            <Button onClick={() => setGameState('menu')} className="w-full" variant="outline">
-              Главное меню
-            </Button>
-          </div>
-        </Card>
-      </div>
-    );
-  }
-
-  if (gameState === 'gameOver') {
-    return (
-      <div className="min-h-screen flex items-center justify-center bg-black/80 backdrop-blur">
-        <Card className="p-8 max-w-md w-full space-y-4">
-          <h2 className="text-4xl font-bold text-center text-destructive">Вы погибли</h2>
-          <div className="text-center space-y-2">
-            <p className="text-xl">Собрано монет: {player.coins}</p>
-            <p className="text-muted-foreground">Убито врагов: {10 - enemies.length}</p>
-          </div>
-          <div className="space-y-2">
-            <Button onClick={startGame} className="w-full">
-              Играть снова
-            </Button>
-            <Button onClick={() => setGameState('menu')} className="w-full" variant="outline">
-              Главное меню
-            </Button>
-          </div>
         </Card>
       </div>
     );
@@ -923,36 +600,45 @@ export default function Index() {
     <div className="relative w-screen h-screen overflow-hidden">
       <canvas ref={canvasRef} className="absolute inset-0" />
       
-      <div className="absolute top-4 left-1/2 -translate-x-1/2 flex gap-4 bg-black/70 backdrop-blur px-6 py-3 rounded-lg">
-        <div className="flex items-center gap-2">
-          <Icon name="Heart" size={20} className="text-destructive" />
-          <span className="font-bold">{player.health}</span>
-        </div>
-        <div className="flex items-center gap-2">
-          <Icon name="Crosshair" size={20} className="text-accent" />
-          <span className="font-bold">{player.ammo}</span>
-        </div>
-        <div className="flex items-center gap-2">
-          <span>🪙</span>
-          <span className="font-bold">{player.coins}</span>
-        </div>
-        <div className="flex items-center gap-2">
-          <Icon name="Zap" size={20} className="text-secondary" />
-          <span className="font-bold">{weapons[player.currentWeapon].name}</span>
-        </div>
-      </div>
-
-      {settings.showHints && (
-        <div className="absolute top-4 right-4 bg-black/70 backdrop-blur px-4 py-2 rounded-lg text-sm">
-          <p>ESC - пауза</p>
-          {!isMobile && !isPointerLocked && <p className="text-accent">Клик - захват мыши</p>}
-          {!isMobile && <p>WASD - движение</p>}
-          {!isMobile && <p>Shift - бег</p>}
-          {!isMobile && <p>Мышь - взгляд</p>}
-          {!isMobile && <p>ЛКМ - стрелять</p>}
-          <p>1-3 - оружие</p>
+      {!isPointerLocked && (
+        <div className="absolute inset-0 flex items-center justify-center bg-black/50">
+          <Card className="p-6">
+            <p className="text-center">Кликните для управления камерой</p>
+          </Card>
         </div>
       )}
+
+      <div className="absolute bottom-4 left-1/2 -translate-x-1/2 flex gap-2">
+        {inventory.map((slot, index) => (
+          <div
+            key={index}
+            className={`w-16 h-16 border-2 ${
+              index === player.selectedSlot ? 'border-white' : 'border-gray-600'
+            } bg-black/70 flex flex-col items-center justify-center`}
+          >
+            {slot.type && (
+              <>
+                <div
+                  className="w-10 h-10 rounded"
+                  style={{ backgroundColor: BLOCK_COLORS[slot.type] }}
+                />
+                <span className="text-xs text-white">{slot.count}</span>
+              </>
+            )}
+          </div>
+        ))}
+      </div>
+
+      <div className="absolute top-4 left-4 bg-black/70 backdrop-blur px-4 py-2 rounded text-sm text-white">
+        <p>WASD - движение</p>
+        <p>Пробел - прыжок</p>
+        <p>Shift - бег</p>
+        <p>ЛКМ - разрушить</p>
+        <p>ПКМ - поставить</p>
+        <p>E - инвентарь</p>
+        <p>1-9 - выбор слота</p>
+        <p>ESC - меню</p>
+      </div>
 
       {isMobile && (
         <>
@@ -979,20 +665,27 @@ export default function Index() {
             onTouchEnd={() => setJoystickPos({ x: 0, y: 0 })}
           >
             <div
-              className="absolute w-12 h-12 bg-white/50 rounded-full top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2"
+              className="absolute w-12 h-12 bg-white/50 rounded-full top-1/2 left-1/2"
               style={{
                 transform: `translate(calc(-50% + ${joystickPos.x * 40}px), calc(-50% + ${-joystickPos.y * 40}px))`,
               }}
             />
           </div>
 
-          <Button
-            className="absolute bottom-24 right-8 w-20 h-20 rounded-full"
-            onTouchStart={shoot}
-            size="lg"
-          >
-            <Icon name="Crosshair" size={32} />
-          </Button>
+          <div className="absolute bottom-24 right-8 space-y-4">
+            <Button
+              className="w-16 h-16 rounded-full"
+              onTouchStart={breakBlock}
+            >
+              <Icon name="Pickaxe" size={24} />
+            </Button>
+            <Button
+              className="w-16 h-16 rounded-full"
+              onTouchStart={placeBlock}
+            >
+              <Icon name="Plus" size={24} />
+            </Button>
+          </div>
         </>
       )}
     </div>
