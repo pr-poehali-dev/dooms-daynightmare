@@ -307,8 +307,12 @@ export default function Index() {
     
     if (now - lastShot < weapon.fireRate || player.ammo < weapon.ammoPerShot) return;
 
+    const shootSound = new Audio('data:audio/wav;base64,UklGRhIAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQA=');
+    shootSound.volume = settings.volume / 100;
+    shootSound.play().catch(() => {});
+
     setLastShot(now);
-    setPlayer(prev => ({ ...prev, ammo: prev.ammo - weapon.ammoPerShot }));
+    setPlayer(prev => ({ ...prev, ammo: Math.max(0, prev.ammo - weapon.ammoPerShot) }));
 
     const newBullet: Bullet = {
       id: Date.now(),
@@ -319,7 +323,7 @@ export default function Index() {
     };
 
     setBullets(prev => [...prev, newBullet]);
-  }, [player, weapons, lastShot]);
+  }, [player, weapons, lastShot, settings.volume]);
 
   const castRay = useCallback((angle: number, maxDist: number = 20): { dist: number; hitWall: boolean } => {
     const rayX = Math.cos(angle);
@@ -348,13 +352,14 @@ export default function Index() {
 
       if (isMobile) {
         newAngle += joystickPos.x * 0.05;
-        const moveSpeed = 0.05;
+        const moveSpeed = 0.03;
         const dx = Math.cos(newAngle) * moveSpeed * joystickPos.y;
         const dy = Math.sin(newAngle) * moveSpeed * joystickPos.y;
         newX += dx;
         newY += dy;
       } else {
-        const moveSpeed = 0.1;
+        const baseSpeed = 0.05;
+        const moveSpeed = keys.has('shift') ? baseSpeed * 1.8 : baseSpeed;
         
         if (keys.has('w')) {
           newX += Math.cos(newAngle) * moveSpeed;
@@ -524,32 +529,34 @@ export default function Index() {
 
     const FOV = Math.PI / 3;
     const graphicsSettings = [
-      { rays: 80, detail: 0.8 },
-      { rays: 160, detail: 1 },
-      { rays: 320, detail: 1.2 },
-      { rays: 640, detail: 1.5 },
+      { rays: 120, detail: 1 },
+      { rays: 240, detail: 1 },
+      { rays: 480, detail: 1 },
+      { rays: 960, detail: 1 },
     ];
     const gfx = graphicsSettings[settings.graphics] || graphicsSettings[1];
     const NUM_RAYS = gfx.rays;
     const MAX_DEPTH = 20;
 
-    ctx.fillStyle = '#0a0a0f';
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
-
     ctx.fillStyle = '#1a1a2e';
+    ctx.fillRect(0, 0, canvas.width, canvas.height / 2);
+
+    ctx.fillStyle = '#0a0a14';
     ctx.fillRect(0, canvas.height / 2, canvas.width, canvas.height / 2);
 
     for (let i = 0; i < NUM_RAYS; i++) {
       const rayAngle = player.angle - FOV / 2 + (i / NUM_RAYS) * FOV;
       const ray = castRay(rayAngle, MAX_DEPTH);
       
+      if (!ray.hitWall) continue;
+      
       const correctedDist = ray.dist * Math.cos(rayAngle - player.angle);
-      const wallHeight = (WALL_HEIGHT / correctedDist) * (canvas.height / 2) * gfx.detail;
+      const wallHeight = (WALL_HEIGHT / Math.max(correctedDist, 0.1)) * (canvas.height / 2);
       
       const brightness = Math.max(0, 1 - correctedDist / MAX_DEPTH);
-      const color = Math.floor(brightness * 150);
+      const color = Math.floor(brightness * 180);
       
-      ctx.fillStyle = `rgb(${color}, ${color * 0.8}, ${color * 0.6})`;
+      ctx.fillStyle = `rgb(${color}, ${Math.floor(color * 0.7)}, ${Math.floor(color * 0.5)})`;
       ctx.fillRect(
         (i / NUM_RAYS) * canvas.width,
         canvas.height / 2 - wallHeight / 2,
@@ -688,6 +695,25 @@ export default function Index() {
       6,
       6
     );
+
+    const weaponSprites = {
+      0: { w: 120, h: 100, color: '#888' },
+      1: { w: 150, h: 120, color: '#a66' },
+      2: { w: 180, h: 90, color: '#66a' },
+    };
+    
+    const weaponSprite = weaponSprites[player.currentWeapon as keyof typeof weaponSprites];
+    const weaponX = canvas.width / 2 - weaponSprite.w / 2;
+    const weaponY = canvas.height - weaponSprite.h - 20;
+    
+    ctx.fillStyle = weaponSprite.color;
+    ctx.fillRect(weaponX, weaponY, weaponSprite.w, weaponSprite.h);
+    
+    ctx.fillStyle = '#444';
+    ctx.fillRect(weaponX + 20, weaponY + 20, weaponSprite.w - 40, 30);
+    
+    ctx.fillStyle = '#222';
+    ctx.fillRect(weaponX + weaponSprite.w / 2 - 15, weaponY - 20, 30, 40);
 
   }, [player, enemies, items, gameState, settings, castRay]);
 
@@ -921,6 +947,7 @@ export default function Index() {
           <p>ESC - пауза</p>
           {!isMobile && !isPointerLocked && <p className="text-accent">Клик - захват мыши</p>}
           {!isMobile && <p>WASD - движение</p>}
+          {!isMobile && <p>Shift - бег</p>}
           {!isMobile && <p>Мышь - взгляд</p>}
           {!isMobile && <p>ЛКМ - стрелять</p>}
           <p>1-3 - оружие</p>
